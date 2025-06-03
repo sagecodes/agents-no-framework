@@ -55,6 +55,7 @@ tool_descriptions = {name: fn.__doc__.strip() for name, fn in tools.items()}
 # ------------------------------
 memory_log = []  # Stores (user_prompt, result_summary)
 
+
 def handle_memory_tool(args):
     if not memory_log:
         return "Memory is empty."
@@ -73,6 +74,7 @@ def handle_memory_tool(args):
             return f"No memory at index {index}."
     else:
         return f"Unknown memory reference: {key}"
+
 
 # ------------------------------
 # Ask LLM to plan tool calls
@@ -152,13 +154,15 @@ async def run_reasoning_agent_async(user_prompt):
                 last_result if str(arg).lower() == "previous" else arg for arg in args
             ]
 
-           # Handle tool calls
+            # Handle tool calls
             if tool_name == "memory":
                 result = handle_memory_tool(args)
             elif tool_name in tools:
                 result = tools[tool_name](*args)
             else:
-                await log_tool_call(tool_name, args, error="Unknown tool", reasoning=reasoning)
+                await log_tool_call(
+                    tool_name, args, error="Unknown tool", reasoning=reasoning
+                )
                 raise ValueError(f"Unknown tool: {tool_name}")
 
             # result = tools[tool_name](*args)
@@ -175,9 +179,9 @@ async def run_reasoning_agent_async(user_prompt):
 
             last_result = result
 
-             # Save to memory
+        # Save to memory
         if steps_log:
-            memory_log.append((user_prompt, steps_log[-1]['result']))
+            memory_log.append((user_prompt, steps_log[-1]["result"]))
 
         return {"final_result": last_result, "steps": steps_log}
 

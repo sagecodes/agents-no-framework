@@ -3,6 +3,7 @@ import json
 import os
 from datetime import datetime
 import sys
+
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
@@ -19,36 +20,47 @@ client = AsyncOpenAI(api_key=api_key)  # Async client for OpenAI API if using no
 # Define Tool Functions
 # Each has a docstring used for LLM context
 # ------------------------------
+
+# --- Tool Registry ---
+tool_registry = {}
+
+# Create Decorator to register tools
+def tool(fn):
+    tool_registry[fn.__name__] = fn
+    return fn
+
+
+@tool
 def add(a, b):
     """Adds two numbers and returns the result."""
     return a + b
 
-
+@tool
 def subtract(a, b):
     """Subtracts the second number from the first and returns the result."""
     return a - b
 
-
+@tool
 def multiply(a, b):
     """Multiplies two numbers and returns the result."""
     return a * b
 
-
+@tool
 def divide(a, b):
     """Divides the first number by the second. Raises error if divide by zero."""
     if b == 0:
         raise ValueError("Cannot divide by zero.")
     return a / b
 
-
+@tool
 def power(a, b):
     """Raises the first number to the power of the second and returns the result."""
     return a**b
 
 
 # Register tools dynamically
-tools = {fn.__name__: fn for fn in [add, subtract, multiply, divide, power]}
-tool_descriptions = {name: fn.__doc__.strip() for name, fn in tools.items()}
+# tools = {fn.__name__: fn for fn in [add, subtract, multiply, divide, power]}
+tools = {name: fn.__doc__.strip() for name, fn in tool_registry.items()}
 
 # ------------------------------
 # Simple in-memory history
@@ -83,7 +95,7 @@ def handle_memory_tool(args):
 async def decide_plan_async(user_prompt):
     # Create a summary of all available tools with descriptions
     tool_list = "\n".join(
-        [f"{name}: {desc}" for name, desc in tool_descriptions.items()]
+        [f"{name}: {desc}" for name, desc in tools.items()]
     )
 
     system_msg = (
@@ -158,7 +170,7 @@ async def run_reasoning_agent_async(user_prompt):
             if tool_name == "memory":
                 result = handle_memory_tool(args)
             elif tool_name in tools:
-                result = tools[tool_name](*args)
+                result = tool_registry[tool_name](*args)
             else:
                 await log_tool_call(
                     tool_name, args, error="Unknown tool", reasoning=reasoning
@@ -214,11 +226,11 @@ if __name__ == "__main__":
     except RuntimeError as e:
         if "cannot be called from a running event loop" in str(e):
             # Handles Jupyter-like environments
-            if sys.platform == "win32": # not tested on Windows yet
+            if sys.platform == "win32":
                 asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
             loop = asyncio.get_event_loop()
             loop.run_until_complete(main())
         else:
             raise
 
-# python 1_simple_agent_memory/agent.py
+# python 2_simple_agent_decorators/agent.py

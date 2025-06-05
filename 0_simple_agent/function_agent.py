@@ -20,7 +20,19 @@ client = AsyncOpenAI(api_key=api_key)  # Async client for OpenAI API if using no
 # Each has a docstring used for LLM context
 # ------------------------------
 def add(a, b):
-    """Adds two numbers and returns the result."""
+    """Adds two numbers and returns the result.
+    This tool can be used to compute the sum of two integers or floats.
+    
+    Example: add(3, 5) returns 8.
+    
+    Args:
+        a (int or float): The first number.
+        b (int or float): The second number.
+
+        Returns:
+        int or float: The sum of a and b.
+        """
+    
     return a + b
 
 

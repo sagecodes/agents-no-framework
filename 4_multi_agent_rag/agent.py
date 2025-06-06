@@ -1,0 +1,334 @@
+# agent.py
+
+import asyncio
+import json
+import os
+import sys
+from datetime import datetime
+from dotenv import load_dotenv
+from openai import AsyncOpenAI
+
+# RAG dependencies
+import chromadb
+from sentence_transformers import SentenceTransformer
+
+# ------------------------------
+# OpenAI Setup
+# ------------------------------
+load_dotenv()
+api_key = os.getenv("OPENAI_API_KEY")
+client = AsyncOpenAI(api_key=api_key)
+
+# ------------------------------
+# Registries
+# ------------------------------
+tool_registry = {}
+agent_tools = {}
+agent_registry = {}
+memory_log = []
+
+# ------------------------------
+# Decorators
+# ------------------------------
+def agent(name):
+    def decorator(fn):
+        agent_registry[name] = fn
+        return fn
+    return decorator
+
+def tool(agent=None):
+    def decorator(fn):
+        name = fn.__name__
+        if agent:
+            agent_tools.setdefault(agent, {})[name] = fn
+        else:
+            tool_registry[name] = fn
+        return fn
+    return decorator
+
+# ------------------------------
+# Logger Utility
+# ------------------------------
+class Logger:
+    def __init__(self, path="agent_trace_log.jsonl"):
+        self.path = path
+
+    async def log(self, **kwargs):
+        kwargs["timestamp"] = datetime.utcnow().isoformat()
+        print("[LOG]", kwargs)
+        with open(self.path, "a") as f:
+            f.write(json.dumps(kwargs) + "\n")
+
+logger = Logger()
+
+# ------------------------------
+# Math Tools
+# ------------------------------
+@tool(agent="math")
+def add(a, b): 
+    """Adds two numbers."""
+    return a + b
+
+@tool(agent="math")
+def multiply(a, b): 
+    """Multiplies two numbers."""
+    return a * b
+
+@tool(agent="math")
+def power(a, b): 
+    """Raises a to the power of b."""
+    return a ** b
+
+# ------------------------------
+# String Tools
+# ------------------------------
+@tool(agent="string")
+def word_count(s): 
+    """Counts number of words in a string."""
+    return len(s.split())
+
+@tool(agent="string")
+def letter_count(s):
+    """Counts number of letters in a string."""
+    return sum(c.isalpha() for c in s)
+
+# ------------------------------
+# Memory Agent
+# ------------------------------
+@agent("memory")
+async def memory_agent(task, memory_log):
+    if not memory_log:
+        return {"result": "Memory is empty."}
+    task = task.lower()
+    try:
+        if "question" in task:
+            return {"result": memory_log[-1][0]}
+        elif "answer" in task or "result" in task:
+            return {"result": memory_log[-1][1]}
+        else:
+            index = int(task)
+            return {"result": memory_log[index][1]}
+    except:
+        return {"result": f"Memory access unclear: {task}"}
+
+# ------------------------------
+# Planner Agent
+# ------------------------------
+@agent("planner")
+async def planner_agent(prompt, memory_log):
+    context = "\n".join([f"- {q} → {r}" for q, r in memory_log[-5:]]) or "No history."
+    available_agents = [a for a in agent_registry if a != "planner"]
+    agent_list = "\n".join([f"- {a}" for a in available_agents])
+
+    system_msg = (
+        f"You are a routing agent.\nAvailable agents:\n{agent_list}\n\n"
+        f"Recent memory:\n{context}\n\n"
+        f"Decide which agent to use and what task to pass it.\n"
+        f"Return JSON like: {{\"agent\": \"math\", \"task\": \"Add 3 and 5\"}}"
+    )
+    res = await client.chat.completions.create(
+        model="gpt-4",
+        messages=[
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": prompt}
+        ]
+    )
+    return json.loads(res.choices[0].message.content)
+
+# ------------------------------
+# Generic Tool-Based Executor
+# ------------------------------
+async def execute_plan(user_prompt, agent=None, system_msg=None):
+    toolset = agent_tools.get(agent, tool_registry)
+    if not system_msg:
+        tool_list = "\n".join([f"{name}: {fn.__doc__.strip()}" for name, fn in toolset.items()])
+        system_msg = (
+            "You are a reasoning agent. Break the user's request into tool calls.\n"
+            f"Available tools:\n{tool_list}\n\n"
+            "For each step, return a list of tool calls like:\n"
+            '[\n'
+            '  {"tool": "word_count", "args": ["hello world"], "reasoning": "Counting words in input."},\n'
+            '  {"tool": "letter_count", "args": ["previous"], "reasoning": "Counting letters in previous result."}\n'
+            ']\n'
+            'IMPORTANT: Always include a "reasoning" field explaining why this tool is being called.'
+        )
+
+    res = await client.chat.completions.create(
+        model="gpt-4",
+        messages=[
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_prompt}
+        ]
+    )
+
+    raw_plan = res.choices[0].message.content
+    print("\n[LLM PLAN]", raw_plan)
+    plan = json.loads(raw_plan)
+
+    steps_log = []
+    last_result = None
+
+    try:
+        for step in plan:
+            tool_name = step["tool"]
+            args = step["args"]
+            reasoning = step.get("reasoning", "")
+            args = [last_result if str(a).lower() == "previous" else a for a in args]
+
+            if tool_name in toolset:
+                result = toolset[tool_name](*args)
+            else:
+                await logger.log(tool=tool_name, args=args, error="Unknown tool", reasoning=reasoning)
+                raise ValueError(f"Unknown tool: {tool_name}")
+
+            await logger.log(tool=tool_name, args=args, result=result, reasoning=reasoning)
+            steps_log.append({"tool": tool_name, "args": args, "result": result, "reasoning": reasoning})
+            last_result = result
+
+        memory_log.append((user_prompt, last_result))
+        return {"final_result": last_result, "steps": steps_log}
+
+    except Exception as e:
+        await logger.log(tool=tool_name if "tool_name" in locals() else "unknown", args=args if "args" in locals() else [], error=str(e))
+        return {"error": str(e), "steps": steps_log}
+
+# ------------------------------
+# Math Agent
+# ------------------------------
+@agent("math")
+async def math_agent(prompt, memory_log):
+    toolset = agent_tools["math"]
+    tool_list = "\n".join([f"{name}: {fn.__doc__.strip()}" for name, fn in toolset.items()])
+    system_msg = (
+        "You are a math agent that can solve arithmetic, powers, and multi-step problems.\n"
+        f"Tools:\n{tool_list}\n\n"
+        "For each step, return a list of tool calls like:\n"
+        '[\n'
+        '  {"tool": "add", "args": [2, 3], "reasoning": "Adding 2 and 3 to compute the sum."},\n'
+        '  {"tool": "multiply", "args": ["previous", 5], "reasoning": "Multiplying previous result by 5."}\n'
+        ']\n'
+        'IMPORTANT: Always include a "reasoning" field explaining why this tool is being called.'
+    )
+    return await execute_plan(prompt, agent="math", system_msg=system_msg)
+
+# ------------------------------
+# String Agent
+# ------------------------------
+@agent("string")
+async def string_agent(prompt, memory_log):
+    toolset = agent_tools["string"]
+    tool_list = "\n".join([f"{name}: {fn.__doc__.strip()}" for name, fn in toolset.items()])
+    system_msg = (
+        "You are a string analysis agent. You can count letters, words, and analyze text.\n"
+        f"Tools:\n{tool_list}\n\n"
+        "For each step, return a list of tool calls like:\n"
+        '[\n'
+        '  {"tool": "word_count", "args": ["hello world"], "reasoning": "Counting words in the input string."},\n'
+        '  {"tool": "letter_count", "args": ["previous"], "reasoning": "Counting letters in the previous result."}\n'
+        ']\n'
+        'IMPORTANT: Always include a "reasoning" field explaining why this tool is being called.'
+    )
+    return await execute_plan(prompt, agent="string", system_msg=system_msg)
+
+# ------------------------------
+# RAG Setup
+# ------------------------------
+chroma_client = chromadb.PersistentClient(path="./chroma_rag")
+rag_collection = chroma_client.get_or_create_collection("rag_demo")
+embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+# Preload knowledge base (run once if needed)
+def preload_knowledge_base():
+    docs = [
+        "The sun is a star at the center of the solar system.",
+        "Planets orbit the sun due to gravity.",
+        "Stars generate energy through nuclear fusion.",
+        "The Earth is the third planet from the sun.",
+        "The moon orbits the Earth and affects tides.",
+    ]
+    ids = [f"doc-{i}" for i in range(len(docs))]
+    embeddings = embed_model.encode(docs).tolist()
+    rag_collection.add(documents=docs, embeddings=embeddings, ids=ids)
+    print(f"✅ Preloaded {len(docs)} documents into RAG DB.")
+
+# preload_knowledge_base()  # uncomment first run if needed!
+
+# ------------------------------
+# RAG Tool — Retrieval Only
+# ------------------------------
+@tool(agent="rag")
+def search_vector_db(query, top_k=3):
+    """Searches the vector DB for relevant documents."""
+    query_embedding = embed_model.encode(query).tolist()
+    results = rag_collection.query(query_embeddings=[query_embedding], n_results=top_k)
+    docs = results["documents"][0] if "documents" in results else []
+
+    # ✅ Log the vector DB result for debugging:
+    asyncio.create_task(logger.log(
+        tool="search_vector_db",
+        args=[query],
+        vector_db_results=docs,
+        reasoning="Vector DB retrieval inside tool call"
+    ))
+
+    return docs
+
+# ------------------------------
+# RAG Agent
+# ------------------------------
+@agent("rag")
+async def rag_agent(prompt, memory_log):
+    toolset = agent_tools["rag"]
+    tool_list = "\n".join([f"{name}: {fn.__doc__.strip()}" for name, fn in toolset.items()])
+    system_msg = (
+        "You are a Knowledge Retrieval agent. You can only retrieve information from a vector database.\n"
+        "You CANNOT add or modify the database.\n"
+        f"Tools:\n{tool_list}\n\n"
+        "Plan a tool call like:\n"
+        '[\n'
+        '  {"tool": "search_vector_db", "args": ["What is the sun?"], "reasoning": "Retrieving documents about the sun from the vector database."}\n'
+        ']\n'
+        'IMPORTANT: Always include a "reasoning" field explaining why this tool is being called.'
+    )
+    return await execute_plan(prompt, agent="rag", system_msg=system_msg)
+
+# ------------------------------
+# Agent Router
+# ------------------------------
+async def multi_agent_router(prompt):
+    plan = await planner_agent(prompt, memory_log)
+    agent_name = plan.get("agent")
+    task = plan.get("task")
+
+    if agent_name not in agent_registry:
+        return {"error": f"Unknown agent: {agent_name}"}
+
+    result = await agent_registry[agent_name](task, memory_log)
+
+    if agent_name != "planner" and isinstance(result, dict) and "result" in result:
+        memory_log.append((prompt, result["result"]))
+
+    return result
+
+# ------------------------------
+# CLI Loop
+# ------------------------------
+async def main():
+    while True:
+        prompt = input("\nAsk something (or type 'exit'): ")
+        if prompt.lower() == "exit":
+            break
+        result = await multi_agent_router(prompt)
+        print(json.dumps(result, indent=2))
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except RuntimeError as e:
+        if "cannot be called from a running event loop" in str(e):
+            if sys.platform == "win32":
+                asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+            loop = asyncio.get_event_loop()
+            loop.run_until_complete(main())
+        else:
+            raise

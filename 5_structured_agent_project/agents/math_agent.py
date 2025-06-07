@@ -1,10 +1,22 @@
-# agents/math_agent.py
+"""
+This module defines the math_agent, which is responsible for solving arithmetic, powers, and multi-step problems.
+"""
 
 from utils.decorators import agent, agent_tools
 from utils.executor import execute_plan
 
 @agent("math")
 async def math_agent(prompt, memory_log):
+    """
+    Math agent that processes user prompts to solve arithmetic and multi-step problems.
+
+    Args:
+        prompt (str): The user prompt containing the math problem.
+        memory_log (list): A log of previous interactions for context.
+
+    Returns:
+        dict: The result of the computation and the steps taken.
+    """
     toolset = agent_tools["math"]
     tool_list = "\n".join([f"{name}: {fn.__doc__.strip()}" for name, fn in toolset.items()])
     system_msg = (
